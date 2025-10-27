@@ -1,0 +1,121 @@
+name: 🔍 Web Archive 検索 & README 更新 (高精度版)
+
+# ワークフローを手動で実行できるようにする
+on:
+  workflow_dispatch:
+    inputs:
+      search_term:
+        description: 'Web Archive で検索するキーワード'
+        required: true
+        default: 'github'
+
+jobs:
+  search-and-update:
+    runs-on: ubuntu-latest
+
+    # リポジトリへの書き込み権限を付与する
+    permissions:
+      contents: write
+
+    steps:
+      # 1. リポジトリのコードをチェックアウト
+      - name: リポジトリをチェックアウト
+        uses: actions/checkout@v4
+
+      # 2. 検索の実行とREADMEのフォーマット
+      - name: 🔎 Internet Archive で高精度検索し、結果をフォーマット
+        id: search
+        shell: bash
+        run: |
+          # ワークフローの入力から検索語を取得
+          SEARCH_TERM="${{ github.event.inputs.search_term }}"
+          
+          echo "検索キーワード: $SEARCH_TERM"
+
+          # --- 検索精度の強化 ---
+          # 1. q=(...): 検索対象を title, description, subject に絞り込む
+          # 2. mediatype:(web): Webアーカイブに限定
+          # 3. fl[]: 取得するフィールドに description を追加
+          # 4. sort[]: publicdate desc (公開日の新しい順) でソート
+          # 5. rows=10: 結果を10件に絞る
+          SEARCH_QUERY="q=(title:($SEARCH_TERM) OR description:($SEARCH_TERM) OR subject:($SEARCH_TERM)) AND mediatype:(web)"
+          FIELDS="fl[]=identifier,title,publicdate,description"
+          SORT="sort[]=publicdate desc"
+          OPTIONS="rows=10&output=json"
+          
+          API_URL="https://archive.org/advancedsearch.php?${SEARCH_QUERY}&${FIELDS}&${SORT}&${OPTIONS}"
+          
+          echo "API URL: $API_URL"
+          
+          # curlでAPIを実行し、結果をresults.jsonに保存
+          curl -Ls "$API_URL" -o results.json
+
+          # 3. 検索結果をMarkdown形式に整形
+          CONTENT_FILE="results_content.md"
+          # jqでヒット件数を取得
+          NUM_FOUND=$(jq '.response.numFound' results.json)
+
+          # --- Markdownコンテンツのヘッダーを作成 ---
+          echo "### 🚀 「${SEARCH_TERM}」の検索結果 (新しい順)" > $CONTENT_FILE
+          echo "" >> $CONTENT_FILE
+          
+          if [ "$NUM_FOUND" -gt 0 ]; then
+            echo "**総ヒット数: $NUM_FOUND 件** (うち上位10件を表示)" >> $CONTENT_FILE
+            echo "" >> $CONTENT_FILE
+            
+            # --- jqを使ってJSONをMarkdown形式に変換 ---
+            # タイトル、公開日、説明文（150文字に丸めて引用）を表示
+            jq -r '.response.docs[] | 
+              "#### [\((.title // "タイトルなし"))](\(https://archive.org/details/.identifier))\n" + 
+              "> *公開日: \((.publicdate[0:10] // "不明"))*\n" +
+              "> \((.description[0] // "説明なし") | if length > 150 then .[0:150] + "..." else . end | gsub("\n"; " "))\n"' results.json >> $CONTENT_FILE
+              
+          else
+            echo "「$SEARCH_TERM」に一致する結果は見つかりませんでした。" >> $CONTENT_FILE
+          fi
+          
+          echo "" >> $CONTENT_FILE
+          echo "---" >> $CONTENT_FILE
+          echo "_最終更新: $(date -u +'%Y-%m-%d %H:%M:%S UTC')_" >> $CONTENT_FILE
+
+          # 4. README.md のプレースホルダー間を置換
+          echo "READMEファイルを更新します..."
+          README_FILE="README.md"
+          TEMP_README="README.tmp"
+          START_TAG=""
+          END_TAG=""
+
+          # csplitを使ってREADMEを開始タグ、中身、終了タグ以降に分割
+          # (BSD sedなどOS差異を避けるため、csplit + cat を使用)
+          csplit -s -z "$README_FILE" "/$START_TAG/" "/$END_TAG/+1" -f "readme_part_"
+          
+          # 分割したファイルを使ってREADMEを再構築
+          cat readme_part_00 > "$TEMP_README"
+          echo "$START_TAG" >> "$TEMP_README"
+          cat "$CONTENT_FILE" >> "$TEMP_README" # 新しいコンテンツを挿入
+          echo "$END_TAG" >> "$TEMP_README"
+          cat readme_part_02 >> "$TEMP_README"
+          
+          # 元のREADMEを置き換える
+          mv "$TEMP_README" "$README_FILE"
+          
+          # 一時ファイルを削除
+          rm readme_part_* results.json $CONTENT_FILE
+
+      # 3. 変更をリポジトリにコミット
+      - name: 変更をコミット
+        shell: bash
+        run: |
+          # Gitのユーザー設定
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          
+          # README.mdに変更があるか確認
+          if ! git diff --quiet README.md; then
+            echo "README.mdに変更がありました。コミットします。"
+            git add README.md
+            git commit -m "docs(readme): Web Archive 検索結果を更新" -m "検索ワード: ${{ github.event.inputs.search_term }}"
+            git push
+          else
+            echo "README.mdに変更はありませんでした。"
+          fi
