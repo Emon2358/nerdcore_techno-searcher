@@ -1,6 +1,5 @@
-name: 🔍 Web Archive 検索 & README 更新 (高精度版)
+name: 🔍 Web Archive 検索 & README 更新 (高精度・改善版)
 
-# ワークフローを手動で実行できるようにする
 on:
   workflow_dispatch:
     inputs:
@@ -12,8 +11,6 @@ on:
 jobs:
   search-and-update:
     runs-on: ubuntu-latest
-
-    # リポジトリへの書き込み権限を付与する
     permissions:
       contents: write
 
@@ -32,27 +29,44 @@ jobs:
           
           echo "検索キーワード: $SEARCH_TERM"
 
-          # --- 検索精度の強化 ---
-          # 1. q=(...): 検索対象を title, description, subject に絞り込む
-          # 2. mediatype:(web): Webアーカイブに限定
-          # 3. fl[]: 取得するフィールドに description を追加
-          # 4. sort[]: publicdate desc (公開日の新しい順) でソート
-          # 5. rows=10: 結果を10件に絞る
-          SEARCH_QUERY="q=(title:($SEARCH_TERM) OR description:($SEARCH_TERM) OR subject:($SEARCH_TERM)) AND mediatype:(web)"
-          FIELDS="fl[]=identifier,title,publicdate,description"
-          SORT="sort[]=publicdate desc"
-          OPTIONS="rows=10&output=json"
+          # --- 検索クエリを定義 ---
+          BASE_URL="https://archive.org/advancedsearch.php"
           
-          API_URL="https://archive.org/advancedsearch.php?${SEARCH_QUERY}&${FIELDS}&${SORT}&${OPTIONS}"
+          # 検索クエリ (q=)
+          # $SEARCH_TERM (例: "KOB records") は --data-urlencode によってエンコードされる
+          QUERY_STRING="(title:($SEARCH_TERM) OR description:($SEARCH_TERM) OR subject:($SEARCH_TERM)) AND mediatype:(web)"
           
-          echo "API URL: $API_URL"
+          # 取得フィールド (fl[]=)
+          FIELDS_VAL="identifier,title,publicdate,description"
           
-          # curlでAPIを実行し、結果をresults.jsonに保存
-          curl -Ls "$API_URL" -o results.json
+          # ソート順 (sort[]=)
+          # "publicdate desc" のスペースも --data-urlencode が処理する
+          SORT_VAL="publicdate desc"
+
+          echo "APIリクエストを送信中..."
+
+          # --- curl を -G と --data-urlencode を使って実行 ---
+          # これにより、スペースや特殊文字が自動的にURLエンコードされる
+          curl -Ls -G "$BASE_URL" \
+            --data-urlencode "q=$QUERY_STRING" \
+            --data-urlencode "fl[]=$FIELDS_VAL" \
+            --data-urlencode "sort[]=$SORT_VAL" \
+            -d "rows=10" \
+            -d "output=json" \
+            -o results.json
+          
+          # curlの終了コードをチェック
+          CURL_EXIT_CODE=$?
+          if [ $CURL_EXIT_CODE -ne 0 ]; then
+            echo "::error:: curlコマンドが失敗しました。終了コード: $CURL_EXIT_CODE"
+            # jq が後続で失敗しないよう、空のJSONを作成
+            echo '{"response": {"numFound": 0, "docs": []}}' > results.json
+          else
+            echo "APIレスポンスを取得しました。"
+          fi
 
           # 3. 検索結果をMarkdown形式に整形
           CONTENT_FILE="results_content.md"
-          # jqでヒット件数を取得
           NUM_FOUND=$(jq '.response.numFound' results.json)
 
           # --- Markdownコンテンツのヘッダーを作成 ---
@@ -64,7 +78,6 @@ jobs:
             echo "" >> $CONTENT_FILE
             
             # --- jqを使ってJSONをMarkdown形式に変換 ---
-            # タイトル、公開日、説明文（150文字に丸めて引用）を表示
             jq -r '.response.docs[] | 
               "#### [\((.title // "タイトルなし"))](\(https://archive.org/details/.identifier))\n" + 
               "> *公開日: \((.publicdate[0:10] // "不明"))*\n" +
@@ -85,8 +98,7 @@ jobs:
           START_TAG=""
           END_TAG=""
 
-          # csplitを使ってREADMEを開始タグ、中身、終了タグ以降に分割
-          # (BSD sedなどOS差異を避けるため、csplit + cat を使用)
+          # csplitを使ってREADMEを分割
           csplit -s -z "$README_FILE" "/$START_TAG/" "/$END_TAG/+1" -f "readme_part_"
           
           # 分割したファイルを使ってREADMEを再構築
@@ -106,11 +118,9 @@ jobs:
       - name: 変更をコミット
         shell: bash
         run: |
-          # Gitのユーザー設定
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           
-          # README.mdに変更があるか確認
           if ! git diff --quiet README.md; then
             echo "README.mdに変更がありました。コミットします。"
             git add README.md
