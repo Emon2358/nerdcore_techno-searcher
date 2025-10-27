@@ -1,4 +1,4 @@
-name: 🔍 Web Archive 検索 & README 更新 (高精度・改善版)
+name: 🔍 Web Archive 検索 & README 更新 (最終改善版)
 
 on:
   workflow_dispatch:
@@ -24,29 +24,17 @@ jobs:
         id: search
         shell: bash
         run: |
-          # ワークフローの入力から検索語を取得
           SEARCH_TERM="${{ github.event.inputs.search_term }}"
-          
           echo "検索キーワード: $SEARCH_TERM"
 
-          # --- 検索クエリを定義 ---
           BASE_URL="https://archive.org/advancedsearch.php"
-          
-          # 検索クエリ (q=)
-          # $SEARCH_TERM (例: "KOB records") は --data-urlencode によってエンコードされる
           QUERY_STRING="(title:($SEARCH_TERM) OR description:($SEARCH_TERM) OR subject:($SEARCH_TERM)) AND mediatype:(web)"
-          
-          # 取得フィールド (fl[]=)
           FIELDS_VAL="identifier,title,publicdate,description"
-          
-          # ソート順 (sort[]=)
-          # "publicdate desc" のスペースも --data-urlencode が処理する
           SORT_VAL="publicdate desc"
 
           echo "APIリクエストを送信中..."
 
-          # --- curl を -G と --data-urlencode を使って実行 ---
-          # これにより、スペースや特殊文字が自動的にURLエンコードされる
+          # curl を -G と --data-urlencode を使って安全に実行
           curl -Ls -G "$BASE_URL" \
             --data-urlencode "q=$QUERY_STRING" \
             --data-urlencode "fl[]=$FIELDS_VAL" \
@@ -55,11 +43,9 @@ jobs:
             -d "output=json" \
             -o results.json
           
-          # curlの終了コードをチェック
           CURL_EXIT_CODE=$?
           if [ $CURL_EXIT_CODE -ne 0 ]; then
             echo "::error:: curlコマンドが失敗しました。終了コード: $CURL_EXIT_CODE"
-            # jq が後続で失敗しないよう、空のJSONを作成
             echo '{"response": {"numFound": 0, "docs": []}}' > results.json
           else
             echo "APIレスポンスを取得しました。"
@@ -69,7 +55,6 @@ jobs:
           CONTENT_FILE="results_content.md"
           NUM_FOUND=$(jq '.response.numFound' results.json)
 
-          # --- Markdownコンテンツのヘッダーを作成 ---
           echo "### 🚀 「${SEARCH_TERM}」の検索結果 (新しい順)" > $CONTENT_FILE
           echo "" >> $CONTENT_FILE
           
@@ -77,7 +62,6 @@ jobs:
             echo "**総ヒット数: $NUM_FOUND 件** (うち上位10件を表示)" >> $CONTENT_FILE
             echo "" >> $CONTENT_FILE
             
-            # --- jqを使ってJSONをMarkdown形式に変換 ---
             jq -r '.response.docs[] | 
               "#### [\((.title // "タイトルなし"))](\(https://archive.org/details/.identifier))\n" + 
               "> *公開日: \((.publicdate[0:10] // "不明"))*\n" +
@@ -91,30 +75,51 @@ jobs:
           echo "---" >> $CONTENT_FILE
           echo "_最終更新: $(date -u +'%Y-%m-%d %H:%M:%S UTC')_" >> $CONTENT_FILE
 
-          # 4. README.md のプレースホルダー間を置換
+          # 4. README.md のプレースホルダー間を置換 (awk を使用した堅牢な方法)
           echo "READMEファイルを更新します..."
           README_FILE="README.md"
           TEMP_README="README.tmp"
-          START_TAG=""
-          END_TAG=""
 
-          # csplitを使ってREADMEを分割
-          csplit -s -z "$README_FILE" "/$START_TAG/" "/$END_TAG/+1" -f "readme_part_"
-          
-          # 分割したファイルを使ってREADMEを再構築
-          cat readme_part_00 > "$TEMP_README"
-          echo "$START_TAG" >> "$TEMP_README"
-          cat "$CONTENT_FILE" >> "$TEMP_README" # 新しいコンテンツを挿入
-          echo "$END_TAG" >> "$TEMP_README"
-          cat readme_part_02 >> "$TEMP_README"
-          
+          # --- エラー修正箇所 ---
+          # csplit と cat の代わりに awk を使用し、タグ間の内容を置換
+          awk -v content_file="$CONTENT_FILE" '
+              BEGIN {
+                  start_tag = ""
+                  end_tag = ""
+                  skip = 0
+              }
+              # 終了タグを見つけたら、skipを解除してタグ自身を出力
+              $0 ~ end_tag {
+                  skip = 0
+                  print $0
+                  next
+              }
+              # 開始タグを見つけたら、タグ自身を出力
+              # その後、新しいコンテンツ (results_content.md) の中身を全て出力
+              # 最後に skip をセット
+              $0 ~ start_tag {
+                  print $0
+                  while ( (getline line < content_file) > 0 ) {
+                      print line
+                  }
+                  close(content_file)
+                  skip = 1
+                  next
+              }
+              # skipがセットされていない場合のみ、現在の行を出力
+              skip == 0 {
+                  print $0
+              }
+          ' "$README_FILE" > "$TEMP_README"
+          # --- エラー修正ここまで ---
+
           # 元のREADMEを置き換える
           mv "$TEMP_README" "$README_FILE"
           
           # 一時ファイルを削除
-          rm readme_part_* results.json $CONTENT_FILE
+          rm results.json $CONTENT_FILE
 
-      # 3. 変更をリポジトリにコミット
+      # 5. 変更をリポジトリにコミット
       - name: 変更をコミット
         shell: bash
         run: |
